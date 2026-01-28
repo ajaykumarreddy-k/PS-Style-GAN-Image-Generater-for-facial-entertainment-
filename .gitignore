@@ -1,2 +1,11 @@
 SKSF-A.zip
 *.zip
+# --- IGNORE THE HEAVY STUFF (Files that kill the push) ---
+dataset_extracted/       # The raw input images (Too big!)
+*.pth                    # The brain files (Too big for standard GitHub!)
+__pycache__/
+*.zip
+
+# --- ALLOW THESE (Do NOT add these to this list) ---
+# output_artistic/       # We WANT this (Your result sketches)
+# output_shading/        # We WANT this
