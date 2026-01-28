@@ -2,22 +2,21 @@ import torch
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
-import matplotlib.pyplot as plt
-import sys
 import os
+import numpy as np
+import cv2 
 
 # ==========================================
-# 1. CONFIG
+# 1. CONFIGURATION
 # ==========================================
-class Config:
-    IMG_SIZE = 256
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    MODEL_PATH = "final_model.pth"   # This file was just created by your training script
-    INPUT_IMAGE = "test_face.jpg"    # <--- RENAME YOUR SELFIE TO THIS
-    OUTPUT_NAME = "result_sketch.png"
+MODEL_PATH = "final_model_SHADING.pth"
+INPUT_IMAGE = "test_face.jpg"
+OUTPUT_FINAL = "result_FINAL_POLISH.png"
+IMG_SIZE = 256
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ==========================================
-# 2. MODEL DEFINITION (Must match training exactly)
+# 2. MODEL ARCHITECTURE
 # ==========================================
 class SafeFusionModule(nn.Module):
     def __init__(self, channels):
@@ -35,71 +34,89 @@ class SketchGenerator(nn.Module):
         self.enc2 = nn.Sequential(*list(vgg.children())[4:14]) 
         self.enc3 = nn.Sequential(*list(vgg.children())[14:24])
         self.fuse = SafeFusionModule(512)
-        
         self.up1 = nn.Sequential(nn.ConvTranspose2d(512, 256, 4, 2, 1), nn.InstanceNorm2d(256), nn.ReLU(True))
         self.up2 = nn.Sequential(nn.ConvTranspose2d(512, 128, 4, 2, 1), nn.InstanceNorm2d(128), nn.ReLU(True))
         self.up3 = nn.Sequential(nn.ConvTranspose2d(192, 64, 4, 2, 1), nn.InstanceNorm2d(64), nn.ReLU(True))
         self.final = nn.Conv2d(64, 1, 3, 1, 1)
-
     def forward(self, x):
         f1 = self.enc1(x)
         f2 = self.enc2(f1)
         f3 = self.enc3(f2)
         x = self.up1(self.fuse(f3))
-        if f2.shape[2:] != x.shape[2:]: f2 = nn.functional.interpolate(f2, size=x.shape[2:])
-        x = self.up2(torch.cat([x, f2], 1))
-        if f1.shape[2:] != x.shape[2:]: f1 = nn.functional.interpolate(f1, size=x.shape[2:])
-        x = self.up3(torch.cat([x, f1], 1))
+        f2_rs = nn.functional.interpolate(f2, size=x.shape[2:]) if f2.shape[2:]!=x.shape[2:] else f2
+        x = self.up2(torch.cat([x, f2_rs], 1))
+        f1_rs = nn.functional.interpolate(f1, size=x.shape[2:]) if f1.shape[2:]!=x.shape[2:] else f1
+        x = self.up3(torch.cat([x, f1_rs], 1))
         return torch.tanh(self.final(x))
 
 # ==========================================
-# 3. RUN
+# 3. THE "SURGICAL POLISH" PIPELINE (Layered + Masked Noise)
 # ==========================================
-def run():
-    if not os.path.exists(Config.MODEL_PATH):
-        print("❌ Error: final_model.pth not found. Did training finish?")
-        return
-    if not os.path.exists(Config.INPUT_IMAGE):
-        print(f"❌ Error: Put a photo named '{Config.INPUT_IMAGE}' in this folder first!")
+def make_it_polished(tensor_output, output_path):
+    print("✨ Applying Surgical Polish (Structure + Detail + Masked Noise)...")
+    
+    # Denormalize
+    img = tensor_output.squeeze().cpu().detach().numpy()
+    img = (img + 1) / 2.0 * 255.0  
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    
+    # Upscale (Lanczos 1024px)
+    img_hd = cv2.resize(img, (1024, 1024), interpolation=cv2.INTER_LANCZOS4)
+
+    # --- LAYER A: STRUCTURE (Bones) ---
+    # High threshold (220) to keep ONLY jaw, eyes, and main outlines.
+    layer_struct = cv2.GaussianBlur(img_hd, (5, 5), 0)
+    _, layer_struct = cv2.threshold(layer_struct, 220, 255, cv2.THRESH_BINARY)
+
+    # --- LAYER B: DETAIL (Texture) ---
+    # Gamma 0.75 makes hair faint gray (pencil) instead of black (ink).
+    gamma = 0.75
+    inv_gamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+    layer_detail = cv2.LUT(img_hd, table)
+    # Soften details so teeth/wrinkles look shaded, not outlined.
+    layer_detail = cv2.GaussianBlur(layer_detail, (3, 3), 0)
+
+    # --- MERGE ---
+    # Combine Strong Lines + Soft Details
+    final_blend = np.minimum(layer_struct, layer_detail)
+
+    # --- PAPER TEXTURE (Masked Noise) ---
+    # Only add noise where lines exist (darker than 250). White paper stays white.
+    stroke_mask = final_blend < 250
+    noise = np.random.normal(0, 4, final_blend.shape).astype(int)
+
+    final_int = final_blend.astype(np.int16)
+    noise_layer = np.zeros_like(final_int)
+    noise_layer[stroke_mask] = noise[stroke_mask]
+    
+    final_int = final_int - noise_layer
+    final_img = np.clip(final_int, 0, 255).astype(np.uint8)
+
+    cv2.imwrite(output_path, final_img)
+    print(f"✅ Saved FINAL POLISH result to: {output_path}")
+
+# ==========================================
+# 4. RUN
+# ==========================================
+def run_test():
+    print(f"🚀 Running Inference...")
+    gen = SketchGenerator().to(DEVICE)
+    try:
+        gen.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+        gen.eval()
+    except:
+        print("❌ Model not found!")
         return
 
-    print("🚀 Loading Model...")
-    model = SketchGenerator().to(Config.DEVICE)
-    model.load_state_dict(torch.load(Config.MODEL_PATH, map_location=Config.DEVICE))
-    model.eval()
+    img = Image.open(INPUT_IMAGE).convert("RGB")
+    tf = transforms.Compose([transforms.Resize((IMG_SIZE, IMG_SIZE)), transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+    img_tensor = tf(img).unsqueeze(0).to(DEVICE)
 
-    img = Image.open(Config.INPUT_IMAGE).convert("RGB")
-    original_size = img.size
-    
-    tf = transforms.Compose([
-        transforms.Resize((Config.IMG_SIZE, Config.IMG_SIZE)),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
-    
-    with torch.no_grad():
-        tensor = tf(img).unsqueeze(0).to(Config.DEVICE)
-        out = model(tensor)
+    with torch.no_grad(): 
+        output = gen(img_tensor)
         
-    # Convert back to image
-    out = (out + 1) / 2.0
-    pil_out = transforms.ToPILImage()(out.squeeze().cpu())
-    pil_out = pil_out.resize(original_size, Image.BICUBIC)
-    
-    pil_out.save(Config.OUTPUT_NAME)
-    print(f"✨ Saved sketch to {Config.OUTPUT_NAME}")
-    
-    # Display result
-    # Display result (Modified to SAVE instead of SHOW)
-    plt.figure(figsize=(10,5))
-    plt.subplot(1,2,1); plt.imshow(img); plt.title("Original")
-    plt.axis("off")
-    plt.subplot(1,2,2); plt.imshow(pil_out, cmap='gray'); plt.title("PS Style GAN")
-    plt.axis("off")
-    
-    # CHANGED: Save the comparison image instead of crashing on .show()
-    plt.savefig("comparison_result.png")
-    print("📸 Saved side-by-side comparison to 'comparison_result.png'")
+    make_it_polished(output, OUTPUT_FINAL)
 
 if __name__ == "__main__":
-    run()
+    run_test()
