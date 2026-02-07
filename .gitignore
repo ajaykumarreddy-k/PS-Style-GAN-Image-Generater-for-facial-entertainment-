@@ -8,4 +8,4 @@ __pycache__/
 
 # --- ALLOW THESE (Do NOT add these to this list) ---
 # output_artistic/       # We WANT this (Your result sketches)
-# output_shading/        # We WANT this
+# output_shading/        # We WANT thisoutput_generated_images/
