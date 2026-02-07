@@ -1,4 +1,4 @@
-# 🎨 Project Vibe: Hybrid Sketch Generation System
+# 🎨 Pencil-Style Image Generater For Facial Entertainment: Hybrid Sketch Generation System
 
 <div align="center">
 
