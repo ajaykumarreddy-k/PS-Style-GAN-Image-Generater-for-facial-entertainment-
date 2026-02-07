@@ -933,6 +933,7 @@ cd final_Cool_Art && python gradio_app.py
 ---
 
 **Made with ❤️ using CV2, PyTorch, and scientific experimentation**
+**Made By Ajay ❤️ **
 
 [⬆ Back to Top](#-project-vibe-hybrid-sketch-generation-system)
 
